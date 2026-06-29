@@ -63,6 +63,11 @@ ANALYZE_PROMPT = """你是一位专业摄影师和调色师。请根据以下图
 - 对比度级别: {contrast_level}
 - 阴影占比: {shadow_ratio:.1%}, 中间调占比: {midtone_ratio:.1%}, 高光占比: {highlight_ratio:.1%}
 - 动态范围: {dynamic_range}
+- 光线质感: {light_quality} (过渡锐度: {transition_sharpness})
+- 局部对比度(微反差): {local_contrast}
+- 影调连续性: {histogram_smoothness} (越接近1越平滑)
+- 光比: {lighting_ratio}
+- 中心亮度权重: {brightness_center_weight} (>1表示中心更亮)
 
 ## 色彩数据
 - 色温倾向: {temperature} (约{temperature_kelvin}K)
@@ -71,13 +76,19 @@ ANALYZE_PROMPT = """你是一位专业摄影师和调色师。请根据以下图
 - 阴影色偏: R{shadow_r} G{shadow_g} B{shadow_b}
 - 高光色偏: R{highlight_r} G{highlight_g} B{highlight_b}
 - 主色板: {palette_desc}
+- 色彩和谐: {harmony_type} (评分: {harmony_score})
+- 冷暖比例: 暖色{warm_ratio:.1%} / 冷色{cool_ratio:.1%}
+- 饱和度一致性: {saturation_uniformity} (标准差: {saturation_std})
+- 色彩分离度: {color_separation} (平均ΔE: {avg_color_distance})
+- 色偏: {color_cast_desc}
+- 色彩情绪: {color_mood}
 
 请从以下方面描述:
-1. **影调特点**: 整体明暗、对比度风格、光影氛围
-2. **色彩特点**: 色温氛围、主色调搭配、阴影/高光的色彩倾向、饱和度风格
+1. **影调特点**: 整体明暗、对比度风格、光线质感(硬光/柔光)、光影氛围、影调层次
+2. **色彩特点**: 色温氛围、色彩和谐关系、冷暖对比、主色调搭配、阴影/高光的色彩倾向、饱和度风格与一致性
 3. **整体风格**: 用2-3句话概括这张照片的视觉风格和情绪
 
-请保持专业但易懂，约200-300字。"""
+请保持专业但易懂，约300-400字。"""
 
 
 MATCH_PROMPT = """你是一位专业调色师。用户想要将自己的照片调成参考图的风格。
@@ -195,6 +206,37 @@ async def analyze_with_llm(
         f"{p['hex']}({p['proportion']:.0%})" for p in color["palette"][:5]
     )
 
+    # Color cast description
+    cast = color.get("color_cast", {})
+    if cast.get("direction"):
+        color_cast_desc = f"偏{cast['direction']} (强度: {cast['strength']})"
+    else:
+        color_cast_desc = "无明显色偏"
+
+    # Harmony type mapping
+    harmony_map = {
+        "complementary": "互补色",
+        "analogous": "类似色",
+        "triadic": "三角色",
+        "split_complementary": "分裂互补",
+        "monochromatic": "单色系",
+        "mixed": "混合",
+    }
+    harmony_info = color.get("color_harmony", {"type": "mixed", "score": 0.5})
+
+    # Color mood mapping
+    mood_map = {
+        "warm_vibrant": "暖调鲜艳",
+        "warm_muted": "暖调柔和",
+        "cool_vibrant": "冷调鲜艳",
+        "cool_muted": "冷调柔和",
+        "dramatic": "戏剧性",
+        "neutral": "中性",
+    }
+
+    # Light quality mapping
+    light_map = {"hard": "硬光", "soft": "柔光", "mixed": "混合光"}
+
     prompt = ANALYZE_PROMPT.format(
         mean_brightness=tone["mean_brightness"],
         std_brightness=tone["std_brightness"],
@@ -205,6 +247,12 @@ async def analyze_with_llm(
         midtone_ratio=tone["midtone_ratio"],
         highlight_ratio=tone["highlight_ratio"],
         dynamic_range=tone["dynamic_range"],
+        light_quality=light_map.get(tone.get("light_quality", "mixed"), "混合光"),
+        transition_sharpness=tone.get("transition_sharpness", 0),
+        local_contrast=tone.get("local_contrast", 0),
+        histogram_smoothness=tone.get("histogram_smoothness", 0),
+        lighting_ratio=tone.get("lighting_ratio", 1.0),
+        brightness_center_weight=tone.get("brightness_center_weight", 1.0),
         temperature={"warm": "偏暖", "cool": "偏冷", "neutral": "中性"}[color["temperature"]],
         temperature_kelvin=color["temperature_kelvin"],
         saturation_level={"high": "高", "medium": "中等", "low": "低"}[color["saturation_level"]],
@@ -217,6 +265,20 @@ async def analyze_with_llm(
         highlight_g=color["highlight_color"]["g"],
         highlight_b=color["highlight_color"]["b"],
         palette_desc=palette_desc,
+        harmony_type=harmony_map.get(harmony_info["type"], harmony_info["type"]),
+        harmony_score=harmony_info["score"],
+        warm_ratio=color.get("warm_ratio", 0),
+        cool_ratio=color.get("cool_ratio", 0),
+        saturation_uniformity={"high": "高", "medium": "中等", "low": "低"}.get(
+            color.get("saturation_uniformity", "medium"), "中等"
+        ),
+        saturation_std=color.get("saturation_std", 0),
+        color_separation={"high": "高", "medium": "中等", "low": "低"}.get(
+            color.get("color_separation", "medium"), "中等"
+        ),
+        avg_color_distance=color.get("avg_color_distance", 0),
+        color_cast_desc=color_cast_desc,
+        color_mood=mood_map.get(color.get("color_mood", "neutral"), "中性"),
     )
 
     return await call_llm(base_url, api_key, model, api_format, prompt)

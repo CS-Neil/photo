@@ -33,6 +33,12 @@ def compute_lr_params(ref_tone: dict, ref_color: dict, user_tone: dict, user_col
     user_tint = (user_color["midtone_color"]["g"] - 128) * 0.5
     tint = round(np.clip(ref_tint - user_tint, -150, 150), 0)
 
+    # --- Clarity (local contrast) ---
+    ref_lc = ref_tone.get("local_contrast", 15)
+    user_lc = user_tone.get("local_contrast", 15)
+    clarity_diff = ref_lc - user_lc
+    clarity = round(np.clip(clarity_diff * 3.0, -100, 100), 0)
+
     # --- Saturation & Vibrance ---
     sat_diff = ref_color["mean_saturation"] - user_color["mean_saturation"]
     saturation = round(np.clip(sat_diff * 0.7, -100, 100), 0)
@@ -84,6 +90,7 @@ def compute_lr_params(ref_tone: dict, ref_color: dict, user_tone: dict, user_col
             "tint": int(tint),
         },
         "presence": {
+            "clarity": int(clarity),
             "vibrance": int(vibrance),
             "saturation": int(saturation),
         },

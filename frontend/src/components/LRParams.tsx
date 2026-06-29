@@ -39,6 +39,7 @@ export default function LRParams({ lrParams, matchDescription }: Props) {
     {
       title: "偏好",
       params: [
+        { label: "清晰度", value: presence.clarity },
         { label: "自然饱和度", value: presence.vibrance },
         { label: "饱和度", value: presence.saturation },
       ],

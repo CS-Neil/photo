@@ -3,6 +3,62 @@ import cv2
 from sklearn.cluster import KMeans
 
 
+def _classify_harmony(hues_deg: list[float]) -> tuple[str, float]:
+    """Classify color harmony type based on dominant palette hues."""
+    if len(hues_deg) < 2:
+        return "monochromatic", 1.0
+
+    hues = sorted(hues_deg)
+    diffs = []
+    for i in range(len(hues)):
+        diff = (hues[(i + 1) % len(hues)] - hues[i]) % 360
+        diffs.append(diff)
+
+    max_diff = max(diffs)
+    min_diff = min(diffs)
+    spread = max_diff - min_diff
+
+    # Check for monochromatic (all hues within 30°)
+    hue_range = (hues[-1] - hues[0]) % 360
+    if hue_range < 30 or (360 - hue_range) < 30:
+        return "monochromatic", 0.9
+
+    # Check for complementary (two clusters ~180° apart)
+    if len(hues) >= 2:
+        for i in range(len(hues)):
+            for j in range(i + 1, len(hues)):
+                angle = abs((hues[j] - hues[i]) % 360)
+                if angle > 180:
+                    angle = 360 - angle
+                if 150 < angle < 210:
+                    return "complementary", round(1.0 - abs(angle - 180) / 30, 2)
+
+    # Check for triadic (three clusters ~120° apart)
+    if len(hues) >= 3:
+        for i in range(len(hues) - 2):
+            d1 = (hues[i + 1] - hues[i]) % 360
+            d2 = (hues[i + 2] - hues[i + 1]) % 360
+            if 90 < d1 < 150 and 90 < d2 < 150:
+                return "triadic", 0.8
+
+    # Check for analogous (hues within 60°)
+    if hue_range < 60 or (360 - hue_range) < 60:
+        return "analogous", 0.85
+
+    # Split complementary
+    if len(hues) >= 3:
+        for i in range(len(hues)):
+            base = hues[i]
+            complement = (base + 180) % 360
+            near_complement = sum(
+                1 for h in hues if h != base and min(abs(h - complement), 360 - abs(h - complement)) < 40
+            )
+            if near_complement >= 2:
+                return "split_complementary", 0.75
+
+    return "mixed", 0.5
+
+
 def analyze_color(img_bgr: np.ndarray) -> dict:
     """Analyze color characteristics of the image."""
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -77,12 +133,101 @@ def analyze_color(img_bgr: np.ndarray) -> dict:
     proportions = (labels_count / labels_count.sum()).tolist()
 
     palette = []
-    for color, proportion in sorted(zip(centers, proportions), key=lambda x: -x[1]):
+    for color_rgb, proportion in sorted(zip(centers, proportions), key=lambda x: -x[1]):
         palette.append({
-            "rgb": color,
-            "hex": "#{:02x}{:02x}{:02x}".format(*color),
+            "rgb": color_rgb,
+            "hex": "#{:02x}{:02x}{:02x}".format(*color_rgb),
             "proportion": round(proportion, 3),
         })
+
+    # --- New dimensions ---
+
+    # 1. Color harmony classification
+    palette_hues = []
+    for c in centers:
+        c_arr = np.uint8([[c]])
+        c_hsv = cv2.cvtColor(c_arr, cv2.COLOR_RGB2HSV)[0][0]
+        if c_hsv[1] > 30:  # only consider saturated colors
+            palette_hues.append(float(c_hsv[0]) * 2)  # convert to 0-360
+    harmony_type, harmony_score = _classify_harmony(palette_hues)
+
+    # 2. Warm/cool ratio
+    # Warm: 0-60°, 300-360°; Cool: 150-270° (in OpenCV 0-180 scale)
+    h_flat = h.flatten()
+    s_flat = s.flatten()
+    # Only count pixels with meaningful saturation
+    saturated_mask = s_flat > 30
+    h_saturated = h_flat[saturated_mask]
+    total_saturated = len(h_saturated) if len(h_saturated) > 0 else 1
+
+    warm_pixels = np.sum((h_saturated < 30) | (h_saturated > 150))  # 0-60° or 300-360°
+    cool_pixels = np.sum((h_saturated >= 75) & (h_saturated <= 135))  # 150-270°
+    warm_ratio = float(warm_pixels / total_saturated)
+    cool_ratio = float(cool_pixels / total_saturated)
+    warm_cool_contrast = round(abs(warm_ratio - cool_ratio), 3)
+
+    # 3. Saturation consistency
+    saturation_std = float(np.std(s))
+    if saturation_std < 30:
+        saturation_uniformity = "high"
+    elif saturation_std > 60:
+        saturation_uniformity = "low"
+    else:
+        saturation_uniformity = "medium"
+
+    # 4. Color separation (average ΔE in Lab space)
+    img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2Lab)
+    centers_bgr = np.array([[c[::-1] for c in centers]], dtype=np.uint8)
+    centers_lab = cv2.cvtColor(centers_bgr, cv2.COLOR_BGR2Lab)[0].astype(np.float64)
+    delta_e_values = []
+    for i in range(len(centers_lab)):
+        for j in range(i + 1, len(centers_lab)):
+            de = np.sqrt(np.sum((centers_lab[i] - centers_lab[j]) ** 2))
+            delta_e_values.append(de)
+    avg_color_distance = float(np.mean(delta_e_values)) if delta_e_values else 0.0
+
+    if avg_color_distance > 80:
+        color_separation_level = "high"
+    elif avg_color_distance < 40:
+        color_separation_level = "low"
+    else:
+        color_separation_level = "medium"
+
+    # 5. Color cast detection (analyze neutral/low-saturation areas)
+    neutral_mask = s.flatten() < 25
+    if np.sum(neutral_mask) > 100:
+        r_flat = r.flatten()[neutral_mask]
+        g_flat = g.flatten()[neutral_mask]
+        b_flat = b.flatten()[neutral_mask]
+        mean_rgb = np.array([np.mean(r_flat), np.mean(g_flat), np.mean(b_flat)])
+        gray_val = np.mean(mean_rgb)
+        deviation = mean_rgb - gray_val
+        max_dev_idx = int(np.argmax(np.abs(deviation)))
+        cast_strength = float(np.abs(deviation[max_dev_idx]))
+        cast_directions = ["red", "green", "blue"]
+        if cast_strength > 5:
+            color_cast_direction = cast_directions[max_dev_idx]
+        else:
+            color_cast_direction = None
+            cast_strength = 0.0
+    else:
+        color_cast_direction = None
+        cast_strength = 0.0
+
+    # 6. Color mood
+    v_std = float(np.std(v))
+    if temperature == "warm" and mean_saturation > 120:
+        color_mood = "warm_vibrant"
+    elif temperature == "warm" and mean_saturation <= 120:
+        color_mood = "warm_muted"
+    elif temperature == "cool" and mean_saturation > 120:
+        color_mood = "cool_vibrant"
+    elif temperature == "cool" and mean_saturation <= 120:
+        color_mood = "cool_muted"
+    elif v_std > 70 and mean_saturation > 100:
+        color_mood = "dramatic"
+    else:
+        color_mood = "neutral"
 
     return {
         "mean_saturation": round(mean_saturation, 1),
@@ -96,4 +241,15 @@ def analyze_color(img_bgr: np.ndarray) -> dict:
         "midtone_color": midtone_color,
         "highlight_color": highlight_color,
         "palette": palette,
+        # New dimensions
+        "color_harmony": {"type": harmony_type, "score": harmony_score},
+        "warm_ratio": round(warm_ratio, 3),
+        "cool_ratio": round(cool_ratio, 3),
+        "warm_cool_contrast": warm_cool_contrast,
+        "saturation_std": round(saturation_std, 1),
+        "saturation_uniformity": saturation_uniformity,
+        "avg_color_distance": round(avg_color_distance, 1),
+        "color_separation": color_separation_level,
+        "color_cast": {"direction": color_cast_direction, "strength": round(cast_strength, 1)},
+        "color_mood": color_mood,
     }
